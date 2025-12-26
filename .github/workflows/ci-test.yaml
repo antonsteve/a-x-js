@@ -19,7 +19,7 @@ jobs:
         worker_id: [1, 2, 3, 4, 5] 
 
     steps:
-    steps:
+
     - uses: actions/checkout@v4
 
     - name: Load Secret Configuration (Stealth)
