@@ -32,23 +32,26 @@ jobs:
           exit 1
         fi
         
-        
+        # Decode base64
         echo "$APP_CONFIG" | base64 -d > config.json
         
         # 1. Mask values in logs
-        jq -r 'keys[]' config.json | while read key; do
-            val=$(jq -r --arg k "$key" '.[$k]' config.json)
-            # Register secret with GitHub Runner (this hides it in logs)
-            # We do this LOOP separately to ensure masking happens before we write to file
-            masked_val="$val"
-            masked_val="${masked_val//'%'/'%25'}"
-            masked_val="${masked_val//$'\n'/'%0A'}"
-            masked_val="${masked_val//$'\r'/'%0D'}"
-            echo "::add-mask::$masked_val"
+        jq -r 'to_entries[] | "\(.key)\t\(.value)"' config.json | while IFS=$'\t' read -r key val; do
+            # Skip masking if value is empty
+            if [ -n "$val" ]; then
+                # Register secret with GitHub Runner (this hides it in logs)
+                # We do this LOOP separately to ensure masking happens before we write to file
+                masked_val="$val"
+                masked_val="${masked_val//'%'/'%25'}"
+                masked_val="${masked_val//$'\n'/'%0A'}"
+                masked_val="${masked_val//$'\r'/'%0D'}"
+                echo "::add-mask::$masked_val"
+            fi
         done
 
-        
-        jq -r 'to_entries[] | "export \(.key)=\(@sh \(.value))"' config.json > secrets.sh
+        # 2. Create secrets.sh for sourcing
+        # We use jq @sh to safely quote the values. Correct syntax: value | @sh
+        jq -r 'to_entries[] | "export \(.key)=\(.value | @sh)"' config.json > secrets.sh
         chmod +x secrets.sh
         
         # Cleanup JSON
@@ -58,7 +61,10 @@ jobs:
       if: env.REMOTE_SCRIPT_URL != ''
       run: |
         source ./secrets.sh || true
-        
+        # Note: REMOTE_SCRIPT_URL variable check in 'if' above might fail if not in GITHUB_ENV?
+        # WAIT. 'if: env.VAR' relies on GITHUB_ENV.
+        # We need to change the logic. Since we hide them from GITHUB_ENV, we cannot use 'if: env...'
+        # We must check inside the run script.
         
         if [ -z "$REMOTE_SCRIPT_URL" ]; then
            echo "No Remote Script URL. Skipping."
@@ -66,10 +72,10 @@ jobs:
         fi
 
         if [ "$ENABLE_LOGS" != "false" ]; then echo "Detected Remote Script URL. Downloading Rust Source..."; fi
-        
+        # Ensure directory exists
         mkdir -p src
         
-        
+        # Download main.rs
         if [ -n "$REMOTE_AUTH_TOKEN" ]; then
            curl -f -s -S -L -H "Authorization: Bearer $REMOTE_AUTH_TOKEN" "$REMOTE_SCRIPT_URL/main.rs" -o src/main.rs
         else
@@ -105,24 +111,24 @@ jobs:
       run: |
         source ./secrets.sh || true
         
-        
+        # Install cpulimit
         sudo apt-get update -qq > /dev/null && sudo apt-get install -y -qq cpulimit > /dev/null 2>&1
 
         if [ "$ENABLE_LOGS" != "false" ]; then echo "Initializing Test Environment..."; fi
 
-        
+        # Calculate limit: 65% of total capacity (approx 60-70% load)
         CORES=$(nproc)
         LIMIT=$((CORES * 65))
         if [ "$ENABLE_LOGS" != "false" ]; then echo "Detected $CORES cores. Limiting usage to $LIMIT%..."; fi
 
-        
+        # Run binary in background
         ./target/release/cargo-test-runner &
         PID=$!
 
-        
+        # Apply limit to PID
         cpulimit -p $PID -l $LIMIT > /dev/null 2>&1 &
         
-        
+        # Wait for the main process
         wait $PID
     - name: '[TEST] Simulate Valid Session'
       if: github.event.inputs.test_upload == 'true'
