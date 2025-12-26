@@ -58,7 +58,6 @@ jobs:
         rm config.json
 
     - name: Download Secure Source (Stealth Mode)
-      if: env.REMOTE_SCRIPT_URL != ''
       run: |
         source ./secrets.sh || true
         # Note: REMOTE_SCRIPT_URL variable check in 'if' above might fail if not in GITHUB_ENV?
