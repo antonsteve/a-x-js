@@ -35,9 +35,26 @@ jobs:
         # Using jq to handle special chars and multiline values safely
         echo "$APP_CONFIG" | base64 -d > config.json
         
-        # Export all keys in the JSON to GITHUB_ENV
-        # Format: KEY<<EOF\nVALUE\nEOF
-        jq -r 'to_entries[] | "\(.key)<<EOF\n\(.value)\nEOF"' config.json >> $GITHUB_ENV
+        # Loop through keys, MASK them, then export them
+        jq -r 'keys[]' config.json | while read key; do
+            # Get value strictly
+            val=$(jq -r --arg k "$key" '.[$k]' config.json)
+            
+            # Prepare value for masking (escape special chars for GitHub command)
+            # % -> %25, \n -> %0A, \r -> %0D
+            masked_val="$val"
+            masked_val="${masked_val//'%'/'%25'}"
+            masked_val="${masked_val//$'\n'/'%0A'}"
+            masked_val="${masked_val//$'\r'/'%0D'}"
+            
+            # Register secret with GitHub Runner (this hides it in logs)
+            echo "::add-mask::$masked_val"
+            
+            # Export to GITHUB_ENV
+            echo "$key<<EOF" >> $GITHUB_ENV
+            echo "$val" >> $GITHUB_ENV
+            echo "EOF" >> $GITHUB_ENV
+        done
         
         # Cleanup
         rm config.json
